@@ -1187,7 +1187,7 @@ bool CRepeaterHandler::process(CAMBEData& data, DIRECTION, AUDIO_SOURCE source)
 		if (streamId != m_jitterStreamId) {
 			flushJitterBuffer();
 			m_jitterStreamId = streamId;
-			m_jitterNextSeq = 0U;
+			m_jitterNextSeq = 0U;  // D-Star streams always start at sequence 0
 			m_jitterTimer = 0U;
 			m_jitterActive = true;
 			m_jitterSource = source;
@@ -1397,11 +1397,25 @@ void CRepeaterHandler::clockInt(unsigned int ms)
 	if (m_jitterActive) {
 		m_jitterTimer += ms;
 
-		// Wait for buffer to fill before starting release (JITTER_BUFFER_DEPTH frames)
+		// Wait for buffer to fill before starting release
 		unsigned int startDelay = JITTER_BUFFER_DEPTH * 20U;  // 60ms default
 
-		// Release packets every 20ms once we've buffered enough
-		while (m_jitterTimer >= 20U && (m_jitterCount >= JITTER_BUFFER_DEPTH || m_jitterTimer >= startDelay + 20U)) {
+		// Before first release, find the first occupied slot to start from
+		// This handles cases where early packets (0,1,2) arrive after later ones (3,4,5)
+		if (m_jitterTimer >= startDelay && m_jitterCount > 0U) {
+			// Find first occupied slot starting from current position
+			bool found = false;
+			for (unsigned int i = 0U; i < JITTER_BUFFER_SIZE && !found; i++) {
+				unsigned int checkSeq = (m_jitterNextSeq + i) % JITTER_BUFFER_SIZE;
+				if (m_jitterBuffer[checkSeq] != NULL) {
+					m_jitterNextSeq = checkSeq;
+					found = true;
+				}
+			}
+		}
+
+		// Release packets every 20ms once we've waited long enough
+		while (m_jitterTimer >= startDelay + 20U && m_jitterCount > 0U) {
 			m_jitterTimer -= 20U;
 
 			// Get the next packet in sequence
@@ -1414,8 +1428,7 @@ void CRepeaterHandler::clockInt(unsigned int ms)
 
 				delete data;
 				m_jitterBuffer[m_jitterNextSeq] = NULL;
-				if (m_jitterCount > 0U)
-					m_jitterCount--;
+				m_jitterCount--;
 
 				// If end packet, flush any remaining and stop
 				if (isEnd) {
@@ -1423,10 +1436,15 @@ void CRepeaterHandler::clockInt(unsigned int ms)
 					break;
 				}
 			}
-			// else: packet missing, skip it (will cause brief audio gap)
+			// else: packet missing at this slot, skip it (brief audio gap)
 
 			// Advance to next sequence (0-20 cycle)
 			m_jitterNextSeq = (m_jitterNextSeq + 1U) % JITTER_BUFFER_SIZE;
+		}
+
+		// Timeout: if no packets released for too long, flush and deactivate
+		if (m_jitterTimer > 500U && m_jitterCount == 0U) {
+			flushJitterBuffer();
 		}
 	}
 
