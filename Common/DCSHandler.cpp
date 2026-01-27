@@ -535,10 +535,7 @@ void CDCSHandler::processInt(CAMBEData& data)
 			if (!m_reflector.IsSameAs(rpt2))
 				return;
 
-			if (m_dcsId == 0x00U && seqNo != 0U)
-				return;
-
-			if (m_dcsId == 0x00U) {		// && seqNo == 0U) {
+			if (m_dcsId == 0x00U) {
 				// Write to Header.log if it's enabled
 				if (m_headerLogger != NULL)
 					m_headerLogger->write(wxT("DCS"), header);
@@ -581,10 +578,7 @@ void CDCSHandler::processInt(CAMBEData& data)
 			if (!m_repeater.IsSameAs(rpt2))
 				return;
 
-			if (m_dcsId == 0x00U && seqNo != 0U)
-				return;
-
-			if (m_dcsId == 0x00U) {		// && seqNo == 0U) {
+			if (m_dcsId == 0x00U) {
 				// Write to Header.log if it's enabled
 				if (m_headerLogger != NULL)
 					m_headerLogger->write(wxT("DCS"), header);
