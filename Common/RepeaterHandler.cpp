@@ -132,11 +132,21 @@ m_ccsHandler(NULL),
 m_lastReflector(),
 m_heardUser(),
 m_heardRepeater(),
-m_heardTimer(1000U, 0U, 100U)		// 100ms
+m_heardTimer(1000U, 0U, 100U),		// 100ms
+m_jitterStreamId(0x00U),
+m_jitterNextSeq(0U),
+m_jitterCount(0U),
+m_jitterTimer(0U),
+m_jitterActive(false),
+m_jitterSource(AS_G2)
 {
 	wxASSERT(!callsign.IsEmpty());
 	wxASSERT(port > 0U);
 	wxASSERT(handler != NULL);
+
+	// Initialize jitter buffer slots
+	for (unsigned int i = 0U; i < JITTER_BUFFER_SIZE; i++)
+		m_jitterBuffer[i] = NULL;
 
 	m_ddMode = band.Len() > 1U;
 
@@ -225,6 +235,10 @@ CRepeaterHandler::~CRepeaterHandler()
 	delete m_msgAudio;
 	delete m_wxAudio;
 	delete m_version;
+
+	// Clean up jitter buffer
+	for (unsigned int i = 0U; i < JITTER_BUFFER_SIZE; i++)
+		delete m_jitterBuffer[i];
 
 	if (m_drats != NULL)
 		m_drats->close();
@@ -1164,12 +1178,41 @@ bool CRepeaterHandler::process(CAMBEData& data, DIRECTION, AUDIO_SOURCE source)
 	data.setBand3(m_band3);
 	data.setDestination(m_address, m_port);
 
+	// For reflector sources, use jitter buffer to reorder packets
+	if (source == AS_DPLUS || source == AS_DEXTRA || source == AS_DCS) {
+		unsigned int streamId = data.getId();
+		unsigned int seqNo = data.getSeq();
+
+		// New stream - flush old buffer and start fresh
+		if (streamId != m_jitterStreamId) {
+			flushJitterBuffer();
+			m_jitterStreamId = streamId;
+			m_jitterNextSeq = 0U;
+			m_jitterTimer = 0U;
+			m_jitterActive = true;
+			m_jitterSource = source;
+		}
+
+		// Store packet in buffer at its sequence position
+		if (seqNo < JITTER_BUFFER_SIZE) {
+			delete m_jitterBuffer[seqNo];  // Delete any existing packet at this slot
+			m_jitterBuffer[seqNo] = new CAMBEData(data);
+			m_jitterCount++;
+		}
+
+		// If this is the end packet, mark it but let clockInt drain the buffer
+		// The end packet will be released in sequence with the others
+
+		// Also forward to CCS handler immediately (CCS doesn't need jitter buffering)
+		m_ccsHandler->writeAMBE(data);
+
+		return true;
+	}
+
+	// Non-reflector sources: pass through immediately (no jitter buffer)
 	m_repeaterHandler->writeAMBE(data);
 
 	sendToIncoming(data);
-
-	if (source == AS_DPLUS || source == AS_DEXTRA || source == AS_DCS)
-		m_ccsHandler->writeAMBE(data);
 
 	if (source == AS_G2 || source == AS_INFO || source == AS_VERSION || source == AS_XBAND || source == AS_ECHO)
 		return true;
@@ -1349,6 +1392,43 @@ void CRepeaterHandler::clockInt(unsigned int ms)
 	m_queryTimer.clock(ms);
 	m_heardTimer.clock(ms);
 	m_pollTimer.clock(ms);
+
+	// Drain jitter buffer at regular intervals (20ms per D-Star frame)
+	if (m_jitterActive) {
+		m_jitterTimer += ms;
+
+		// Wait for buffer to fill before starting release (JITTER_BUFFER_DEPTH frames)
+		unsigned int startDelay = JITTER_BUFFER_DEPTH * 20U;  // 60ms default
+
+		// Release packets every 20ms once we've buffered enough
+		while (m_jitterTimer >= 20U && (m_jitterCount >= JITTER_BUFFER_DEPTH || m_jitterTimer >= startDelay + 20U)) {
+			m_jitterTimer -= 20U;
+
+			// Get the next packet in sequence
+			CAMBEData* data = m_jitterBuffer[m_jitterNextSeq];
+			if (data != NULL) {
+				releaseJitterPacket(data);
+
+				// Check if this was the end packet
+				bool isEnd = data->isEnd();
+
+				delete data;
+				m_jitterBuffer[m_jitterNextSeq] = NULL;
+				if (m_jitterCount > 0U)
+					m_jitterCount--;
+
+				// If end packet, flush any remaining and stop
+				if (isEnd) {
+					flushJitterBuffer();
+					break;
+				}
+			}
+			// else: packet missing, skip it (will cause brief audio gap)
+
+			// Advance to next sequence (0-20 cycle)
+			m_jitterNextSeq = (m_jitterNextSeq + 1U) % JITTER_BUFFER_SIZE;
+		}
+	}
 
 	// If the reconnect timer has expired
 	if (m_linkReconnectTimer.isRunning() && m_linkReconnectTimer.hasExpired()) {
@@ -2981,4 +3061,46 @@ bool CRepeaterHandler::isCCSCommand(const wxString& command) const
 		return false;
 
 	return true;
+}
+
+void CRepeaterHandler::releaseJitterPacket(CAMBEData* data)
+{
+	// Send to repeater hardware
+	m_repeaterHandler->writeAMBE(*data);
+
+	// Send to incoming dongles
+	sendToIncoming(*data);
+
+	// Collect the text from the slow data for DCS
+	if (m_text.IsEmpty() && !data->isEnd()) {
+		m_textCollector.writeData(*data);
+
+		bool hasText = m_textCollector.hasData();
+		if (hasText)
+			m_text = m_textCollector.getData();
+	}
+
+	data->setText(m_text);
+
+	// Send to outgoing links
+	sendToOutgoing(*data);
+}
+
+void CRepeaterHandler::flushJitterBuffer()
+{
+	// Release any remaining packets in sequence order
+	for (unsigned int i = 0U; i < JITTER_BUFFER_SIZE; i++) {
+		unsigned int seq = (m_jitterNextSeq + i) % JITTER_BUFFER_SIZE;
+		if (m_jitterBuffer[seq] != NULL) {
+			releaseJitterPacket(m_jitterBuffer[seq]);
+			delete m_jitterBuffer[seq];
+			m_jitterBuffer[seq] = NULL;
+		}
+	}
+
+	m_jitterCount = 0U;
+	m_jitterActive = false;
+	m_jitterStreamId = 0x00U;
+	m_jitterNextSeq = 0U;
+	m_jitterTimer = 0U;
 }

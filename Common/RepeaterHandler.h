@@ -277,6 +277,19 @@ private:
 	wxString                  m_heardRepeater;
 	CTimer                    m_heardTimer;
 
+	// Jitter buffer for reflector audio (reorders out-of-sequence packets)
+	static const unsigned int JITTER_BUFFER_SIZE = 21U;  // D-Star sequence 0-20
+	static const unsigned int JITTER_BUFFER_DEPTH = 3U;  // Frames to buffer before release (60ms)
+	CAMBEData*                m_jitterBuffer[21];        // Indexed by sequence number
+	unsigned int              m_jitterStreamId;          // Current stream being buffered
+	unsigned int              m_jitterNextSeq;           // Next sequence to release
+	unsigned int              m_jitterCount;             // Packets currently buffered
+	unsigned int              m_jitterTimer;             // Milliseconds since last release
+	bool                      m_jitterActive;            // Buffer is actively collecting
+	AUDIO_SOURCE              m_jitterSource;            // Source of current jittered stream
+	void                      releaseJitterPacket(CAMBEData* data);
+	void                      flushJitterBuffer(void);
+
 	void g2CommandHandler(const wxString& callsign, const wxString& user, CHeaderData& header);
 	void ccsCommandHandler(const wxString& callsign, const wxString& user, const wxString& type);
 	void reflectorCommandHandler(const wxString& callsign, const wxString& user, const wxString& type);
