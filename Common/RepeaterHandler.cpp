@@ -1178,33 +1178,22 @@ bool CRepeaterHandler::process(CAMBEData& data, DIRECTION, AUDIO_SOURCE source)
 	data.setBand3(m_band3);
 	data.setDestination(m_address, m_port);
 
-	// For reflector sources, use jitter buffer to reorder packets
+	// For reflector sources (DPlus, DCS, DExtra), pass through directly
+	// Jitter buffer disabled - the seqNo==0 fix handles stream start issues
 	if (source == AS_DPLUS || source == AS_DEXTRA || source == AS_DCS) {
-		unsigned int streamId = data.getId();
-		unsigned int seqNo = data.getSeq();
-
-		// New stream - flush old buffer and start fresh
-		if (streamId != m_jitterStreamId) {
-			flushJitterBuffer();
-			m_jitterStreamId = streamId;
-			m_jitterNextSeq = 0U;  // D-Star streams always start at sequence 0
-			m_jitterTimer = 0U;
-			m_jitterActive = true;
-			m_jitterSource = source;
-		}
-
-		// Store packet in buffer at its sequence position
-		if (seqNo < JITTER_BUFFER_SIZE) {
-			delete m_jitterBuffer[seqNo];  // Delete any existing packet at this slot
-			m_jitterBuffer[seqNo] = new CAMBEData(data);
-			m_jitterCount++;
-		}
-
-		// If this is the end packet, mark it but let clockInt drain the buffer
-		// The end packet will be released in sequence with the others
-
-		// Also forward to CCS handler immediately (CCS doesn't need jitter buffering)
+		m_repeaterHandler->writeAMBE(data);
+		sendToIncoming(data);
 		m_ccsHandler->writeAMBE(data);
+
+		// Collect the text from the slow data for DCS
+		if (m_text.IsEmpty() && !data.isEnd()) {
+			m_textCollector.writeData(data);
+			bool hasText = m_textCollector.hasData();
+			if (hasText)
+				m_text = m_textCollector.getData();
+		}
+		data.setText(m_text);
+		sendToOutgoing(data);
 
 		return true;
 	}
